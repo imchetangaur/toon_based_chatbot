@@ -17,8 +17,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # Load environment variables
 load_dotenv()
@@ -250,36 +248,42 @@ def get_llm():
 def prepare_messages_with_history(
     current_message: str,
     history: List[Dict[str, str]]
-) -> List:
-    """Prepare messages with conversation history using MessagesPlaceholder"""
+) -> str:
+    """Prepare messages with conversation history in TOON format for token efficiency"""
     logger.debug(f"📝 Preparing messages with {len(history)} historical messages")
 
-    # Create a prompt template with history placeholder
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful AI assistant. Use the conversation history to provide contextual responses."),
-        MessagesPlaceholder(variable_name="history"),
-        ("human", "{input}")
-    ])
+    # Encode conversation history in TOON format for compact representation
+    if history and len(history) > 0:
+        history_toon = encode(history)
 
-    # Convert history to LangChain message objects
-    history_messages = []
-    for msg in history:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
+        # Log token efficiency
+        if TOON_AVAILABLE:
+            import json
+            # Compare TOON vs traditional message format
+            json_size = len(json.dumps(history))
+            toon_size = len(history_toon)
+            savings = ((json_size - toon_size) / json_size * 100) if json_size > 0 else 0
+            logger.info(f"📊 LLM Context efficiency: JSON={json_size}B, TOON={toon_size}B, Savings={savings:.1f}%")
 
-        if role == "user":
-            history_messages.append(HumanMessage(content=content))
-        elif role == "assistant":
-            history_messages.append(AIMessage(content=content))
+        # Create prompt with TOON-encoded history
+        prompt = f"""You are a helpful AI assistant. Below is the conversation history in TOON format (a compact data format where field names are declared once, followed by row data).
 
-    # Format the prompt with history and current input
-    formatted_messages = prompt.format_messages(
-        history=history_messages,
-        input=current_message
-    )
+Previous conversation (TOON format):
+{history_toon}
 
-    logger.debug(f"✅ Formatted {len(formatted_messages)} total messages for LLM")
-    return formatted_messages
+Current user message: {current_message}
+
+Please provide a helpful response based on the conversation context above."""
+    else:
+        # No history, just current message
+        prompt = f"""You are a helpful AI assistant.
+
+User message: {current_message}
+
+Please provide a helpful response."""
+
+    logger.debug(f"✅ Prepared prompt with TOON-encoded history ({len(prompt)} chars)")
+    return prompt
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -336,13 +340,13 @@ async def chat(request: ChatRequest):
         else:
             logger.info(f"📊 Sending all {len(recent_history)} messages (under window size)")
 
-        # Prepare messages with history
-        lc_messages = prepare_messages_with_history(user_message, recent_history)
+        # Prepare prompt with TOON-encoded history
+        prompt_with_toon_history = prepare_messages_with_history(user_message, recent_history)
 
         # Get LLM and generate response
-        logger.info(f"🤖 Invoking LLM...")
+        logger.info(f"🤖 Invoking LLM with TOON-formatted context...")
         llm = get_llm()
-        response = await llm.ainvoke(lc_messages)
+        response = await llm.ainvoke(prompt_with_toon_history)
 
         response_preview = response.content[:100] + ('...' if len(response.content) > 100 else '')
         logger.info(f"✅ LLM response: '{response_preview}'")
